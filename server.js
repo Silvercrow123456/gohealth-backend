@@ -10,6 +10,7 @@ const Reminder = require('./models/Reminder');
 const { ConsultMsg, Reservation } = require('./models/Consult');
 const Medication = require('./models/Medication');
 const Stats = require('./models/Stats');
+const nodemailer = require('nodemailer');
 
 const app = express();
 
@@ -173,6 +174,36 @@ app.get('/api/stats/:userId', async (req, res) => {
     const data = await Stats.findOne({ userId: req.params.userId });
     res.json({ success: true, data: data || {} });
   } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+/* =======================================================
+   (八) 發送 Email API
+   ======================================================= */
+app.post('/api/send-email', async (req, res) => {
+  try {
+    const { to, subject, text } = req.body;
+
+    // 設定寄信的帳號與密碼 (從環境變數讀取)
+    const transporter = nodemailer.createTransport({
+      service: 'gmail',
+      auth: {
+        user: process.env.EMAIL_USER, // 你的公用 Gmail
+        pass: process.env.EMAIL_PASS  // 剛剛申請的 16 字元密碼
+      }
+    });
+
+    const mailOptions = {
+      from: `"穩糖圈系統" <${process.env.EMAIL_USER}>`,
+      to: to,
+      subject: subject,
+      text: text
+    };
+
+    await transporter.sendMail(mailOptions);
+    res.json({ success: true, message: '信件發送成功' });
+  } catch (error) {
+    console.error('寄信失敗:', error);
     res.status(500).json({ success: false, error: error.message });
   }
 });
