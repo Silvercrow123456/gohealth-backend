@@ -188,8 +188,8 @@ app.post('/api/send-email', async (req, res) => {
     const transporter = nodemailer.createTransport({
       service: 'gmail',
       auth: {
-        user: process.env.EMAIL_USER, // 你的公用 Gmail
-        pass: process.env.EMAIL_PASS  // 剛剛申請的 16 字元密碼
+        user: process.env.gohealth583@gmail.com
+        pass: process.env.gzyk hpqn wdxv ltfe
       }
     });
 
