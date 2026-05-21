@@ -11,6 +11,7 @@ const { ConsultMsg, Reservation } = require('./models/Consult');
 const Medication = require('./models/Medication');
 const Stats = require('./models/Stats');
 const nodemailer = require('nodemailer');
+const Ttm = require('./models/Ttm'); 
 
 const app = express();
 
@@ -204,6 +205,70 @@ app.post('/api/send-email', async (req, res) => {
     res.json({ success: true, message: '信件發送成功' });
   } catch (error) {
     console.error('寄信失敗:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+/* =======================================================
+   (九) TTM 測驗 API (包含後台自動分組邏輯)
+   ======================================================= */
+app.post('/api/ttm', async (req, res) => {
+  try {
+    const { userId, scores } = req.body;
+    
+    // 1. 後端自動計算分組 (依據你的規則)
+    let group = 'C'; 
+    if (scores.some(s => s === 0 || s === 1)) {
+      group = 'A'; // 任一題有 0 或 1 進 A 組
+    } else if (scores.some(s => s === 2 || s === 3)) {
+      group = 'B'; // 排除 A 之後，任一題有 2 或 3 進 B 組
+    } else {
+      group = 'C'; // 剩下的情況 (全部都是 4 或 5) 進 C 組
+    }
+
+    // 2. 計算總分與對應階段
+    const totalScore = scores.reduce((a, b) => a + b, 0);
+    let stage = '無意圖期';
+    if (totalScore <= 12) stage = '無意圖期';
+    else if (totalScore <= 18) stage = '準備期';
+    else if (totalScore <= 24) stage = '行動期';
+    else stage = '維持期';
+
+    const ttmData = { userId, scores, totalScore, stage, group };
+
+    // 3. 儲存至資料庫
+    const savedTtm = await Ttm.findOneAndUpdate(
+      { userId }, ttmData, { new: true, upsert: true }
+    );
+
+    // 4. 回傳給前端時，刻意「不回傳 group」，確保受試者看不到！
+    res.json({ 
+      success: true, 
+      data: {
+        scores: savedTtm.scores,
+        totalScore: savedTtm.totalScore,
+        stage: savedTtm.stage
+      } 
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.get('/api/ttm/:userId', async (req, res) => {
+  try {
+    const data = await Ttm.findOne({ userId: req.params.userId });
+    if (!data) return res.json({ success: true, data: null });
+
+    // 同樣，讀取時也不要把 group 傳給前端
+    res.json({ 
+      success: true, 
+      data: {
+        scores: data.scores,
+        totalScore: data.totalScore,
+        stage: data.stage
+      } 
+    });
+  } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }
 });
