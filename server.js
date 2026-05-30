@@ -87,22 +87,31 @@ app.delete('/api/glucose/:id', async (req, res) => {
    (三) 生理數值 API (改為保留歷史紀錄模式)
    ======================================================= */
 app.get('/api/biochem/:userId', async (req, res) => {
-  // 改為 .find() 抓取全部，並依時間倒序排列 (最新的在最上面)
   const data = await Biochem.find({ userId: req.params.userId }).sort({ createdAt: -1 });
   res.json({ success: true, data: data || [] });
 });
 
 app.post('/api/biochem', async (req, res) => {
-  // 改為每次都 new 一個新紀錄存進去，不覆蓋舊的
   const newBio = new Biochem(req.body);
   const data = await newBio.save();
   res.json({ success: true, data });
 });
 
+// 1. 原本的：刪除某使用者的「全部」歷史紀錄
 app.delete('/api/biochem/:userId', async (req, res) => {
-  // 清除時，把該病患的所有歷史紀錄都刪掉
   await Biochem.deleteMany({ userId: req.params.userId });
   res.json({ success: true });
+});
+
+// 2. 🟢 新增的：刪除「單一筆」生理歷史紀錄
+app.delete('/api/biochem/item/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    await Biochem.findByIdAndDelete(id);
+    res.json({ success: true, message: '刪除成功' });
+  } catch (error) {
+    res.status(500).json({ success: false, message: '刪除失敗', error: error.message });
+  }
 });
 
 /* =======================================================
