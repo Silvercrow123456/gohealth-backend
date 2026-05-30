@@ -295,12 +295,40 @@ app.get('/api/ttm/:userId', async (req, res) => {
     const { userId } = req.params;
     
     // 平行去兩個不同的 Collection 抓資料
-    const [ttmData, rctData] = await Promise.all([
+    let [ttmData, rctData] = await Promise.all([
       Ttm.findOne({ userId }),
       RctGroup.findOne({ userId })
     ]);
 
+    // 如果連 TTM 測驗都沒做過，直接回傳 null 讓前端去考試
     if (!ttmData) return res.json({ success: true, data: null });
+
+    // 🟢 補救措施：如果是舊帳號（有 TTM 紀錄，但從來沒被分過組），在此自動幫他補分組！
+    if (!rctData) {
+      let state = await RctState.findOne({ key: 'block_4' });
+      if (!state) state = new RctState({ key: 'block_4', sequence: [] });
+
+      if (state.sequence.length === 0) {
+        const blocks = [
+          ['control', 'control', 'experimental', 'experimental'],
+          ['control', 'experimental', 'control', 'experimental'],
+          ['control', 'experimental', 'experimental', 'control'],
+          ['experimental', 'control', 'control', 'experimental'],
+          ['experimental', 'control', 'experimental', 'control'],
+          ['experimental', 'experimental', 'control', 'control']
+        ];
+        const randomIndex = Math.floor(Math.random() * blocks.length);
+        state.sequence = blocks[randomIndex]; 
+        console.log('📦 產生新區塊 (補救舊帳號用):', state.sequence);
+      }
+
+      const assignedGroup = state.sequence.shift();
+      await state.save();
+      
+      // 寫入 RctGroup 資料庫
+      rctData = await new RctGroup({ userId, assignedGroup }).save();
+      console.log(`📦 舊帳號 ${userId} 補分組成功:`, assignedGroup);
+    }
 
     res.json({ 
       success: true, 
@@ -308,13 +336,14 @@ app.get('/api/ttm/:userId', async (req, res) => {
         scores: ttmData.scores,
         totalScore: ttmData.totalScore,
         stage: ttmData.stage,
-        rctGroup: rctData ? rctData.assignedGroup : 'experimental' // 預設防呆
+        rctGroup: rctData.assignedGroup // 回傳確定的分組
       } 
     });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }
 });
+
 // ==========================================
 // 啟動伺服器 (相容本機端與 Vercel Serverless)
 // ==========================================
