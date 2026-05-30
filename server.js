@@ -345,16 +345,25 @@ app.get('/api/ttm/:userId', async (req, res) => {
   }
 });
 /* =======================================================
-   (十) 研究人員專用：匯出全資料庫 Excel API
+   (十) 研究人員專用：匯出全資料庫 Excel API (防呆加強版)
    ======================================================= */
 app.get('/api/export-excel', async (req, res) => {
   try {
     // 1. 從各個 Collection 抓取所有資料
     const rctGroups = await RctGroup.find().lean();
+    
+    // 🟢 防呆：如果資料庫完全沒有受試者，提早擋下來，避免套件當機
+    if (!rctGroups || rctGroups.length === 0) {
+      return res.status(400).send(`
+        <h2 style="color:#D32F2F;">目前資料庫是空的喔！</h2>
+        <p>目前還沒有任何受試者被分組，請先用至少一個帳號登入並完成 TTM 測驗後，再來匯出資料。</p>
+      `);
+    }
+
     const ttms = await Ttm.find().lean();
     const biochems = await Biochem.find().lean();
     const stats = await Stats.find().lean();
-    const glucoses = await Glucose.find().sort({ measuredAt: 1 }).lean(); // 依時間排序
+    const glucoses = await Glucose.find().sort({ measuredAt: 1 }).lean(); 
 
     // 2. 製作「第一頁：病患總表 (Summary)」
     const summaryData = rctGroups.map(rct => {
@@ -363,13 +372,12 @@ app.get('/api/export-excel', async (req, res) => {
       const bio = biochems.find(b => b.userId === uId) || {};
       const st = stats.find(s => s.userId === uId) || {};
       
-      // 計算該病患的血糖統計
       const userGlucoses = glucoses.filter(g => g.userId === uId);
       const countGlu = userGlucoses.length;
       let avgGlu = '';
       if (countGlu > 0) {
         const sum = userGlucoses.reduce((a, b) => a + b.value, 0);
-        avgGlu = (sum / countGlu).toFixed(1); // 算平均值到小數點第一位
+        avgGlu = (sum / countGlu).toFixed(1); 
       }
 
       return {
@@ -395,33 +403,44 @@ app.get('/api/export-excel', async (req, res) => {
     });
 
     // 3. 製作「第二頁：血糖原始數據 (Raw Glucose)」
-    const glucoseData = glucoses.map(g => ({
+    let glucoseData = glucoses.map(g => ({
       '病患帳號 (userId)': g.userId,
       '量測時間': new Date(g.measuredAt).toLocaleString('zh-TW', { timeZone: 'Asia/Taipei' }),
       '血糖數值 (mg/dL)': g.value
     }));
 
+    // 🟢 防呆：如果大家完全都沒測過血糖，給一筆假資料避免分頁建立失敗
+    if (glucoseData.length === 0) {
+      glucoseData = [{ '病患帳號 (userId)': '尚無紀錄', '量測時間': '', '血糖數值 (mg/dL)': '' }];
+    }
+
     // 4. 產生 Excel 檔案
-    const wb = xlsx.utils.book_new(); // 建立新活頁簿
-    
-    // 把資料轉成 Sheet 並塞進活頁簿
+    const wb = xlsx.utils.book_new(); 
     const wsSummary = xlsx.utils.json_to_sheet(summaryData);
     const wsGlucose = xlsx.utils.json_to_sheet(glucoseData);
     xlsx.utils.book_append_sheet(wb, wsSummary, '病患總表 (Summary)');
     xlsx.utils.book_append_sheet(wb, wsGlucose, '血糖原始數據 (Glucose)');
 
-    // 5. 轉換成 Buffer 並設定 HTTP Header 讓瀏覽器下載
+    // 5. 轉換成 Buffer 並設定 HTTP Header
     const buffer = xlsx.write(wb, { type: 'buffer', bookType: 'xlsx' });
-    
-    // 設定下載的檔名 (加上今天日期)
     const today = new Date().toISOString().split('T')[0];
     res.setHeader('Content-Disposition', `attachment; filename="goHealth_Research_Data_${today}.xlsx"`);
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    
     res.send(buffer);
+
   } catch (error) {
+    // 🟢 終極抓蟲：直接把真正的錯誤原因印在畫面上！
     console.error('匯出失敗:', error);
-    res.status(500).send('匯出 Excel 時發生錯誤');
+    res.status(500).send(`
+      <div style="font-family: Arial; padding: 20px;">
+        <h2 style="color:#D32F2F;">匯出 Excel 失敗 🐞</h2>
+        <p>系統遇到了以下錯誤，請截圖給工程師看：</p>
+        <div style="background: #eee; padding: 15px; border-radius: 8px; color: #333;">
+          <strong>Error Message:</strong> <br> ${error.message} <br><br>
+          <strong>Stack Trace:</strong> <br> <pre>${error.stack}</pre>
+        </div>
+      </div>
+    `);
   }
 });
 
