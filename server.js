@@ -12,6 +12,8 @@ const Medication = require('./models/Medication');
 const Stats = require('./models/Stats');
 const nodemailer = require('nodemailer');
 const Ttm = require('./models/Ttm'); 
+const RctGroup = require('./models/RctGroup');
+const RctState = require('./models/RctState');
 
 const app = express();
 
@@ -209,23 +211,17 @@ app.post('/api/send-email', async (req, res) => {
   }
 });
 /* =======================================================
-   (九) TTM 測驗 API (包含後台自動分組邏輯)
+   (九) TTM 測驗與 RCT 獨立分組 API
    ======================================================= */
 app.post('/api/ttm', async (req, res) => {
   try {
     const { userId, scores } = req.body;
     
-    // 1. 後端自動計算分組 (依據你的規則)
+    // 1. 計算原本的分數與階段
     let group = 'C'; 
-    if (scores.some(s => s === 0 || s === 1)) {
-      group = 'A'; // 任一題有 0 或 1 進 A 組
-    } else if (scores.some(s => s === 2 || s === 3)) {
-      group = 'B'; // 排除 A 之後，任一題有 2 或 3 進 B 組
-    } else {
-      group = 'C'; // 剩下的情況 (全部都是 4 或 5) 進 C 組
-    }
-
-    // 2. 計算總分與對應階段
+    if (scores.some(s => s === 0 || s === 1)) group = 'A';
+    else if (scores.some(s => s === 2 || s === 3)) group = 'B';
+    
     const totalScore = scores.reduce((a, b) => a + b, 0);
     let stage = '無意圖期';
     if (totalScore <= 12) stage = '無意圖期';
@@ -233,20 +229,59 @@ app.post('/api/ttm', async (req, res) => {
     else if (totalScore <= 24) stage = '行動期';
     else stage = '維持期';
 
+    // 2. 儲存 TTM 到 Ttm Collection (這裏只存 ABC 組，不存 RCT)
     const ttmData = { userId, scores, totalScore, stage, group };
-
-    // 3. 儲存至資料庫
     const savedTtm = await Ttm.findOneAndUpdate(
       { userId }, ttmData, { new: true, upsert: true }
     );
 
-    // 4. 回傳給前端時，刻意「不回傳 group」，確保受試者看不到！
+    // 3. 🟢 獨立處理 RCT 分組 (Block Randomization, Block size = 4)
+    let existingRct = await RctGroup.findOne({ userId });
+    let assignedGroup = '';
+
+    if (existingRct) {
+      // 情況 A：已經分過組的病患，沿用舊分組
+      assignedGroup = existingRct.assignedGroup; 
+    } else {
+      // 情況 B：新病患，需要進行隨機分派
+      
+      // B-1. 從資料庫叫出目前的「區塊狀態」
+      let state = await RctState.findOne({ key: 'block_4' });
+      if (!state) state = new RctState({ key: 'block_4', sequence: [] });
+
+      // B-2. 如果目前的區塊被發光了（陣列為空），就隨機生成一個新的區塊！
+      if (state.sequence.length === 0) {
+        const blocks = [
+          ['control', 'control', 'experimental', 'experimental'],
+          ['control', 'experimental', 'control', 'experimental'],
+          ['control', 'experimental', 'experimental', 'control'],
+          ['experimental', 'control', 'control', 'experimental'],
+          ['experimental', 'control', 'experimental', 'control'],
+          ['experimental', 'experimental', 'control', 'control']
+        ];
+        const randomIndex = Math.floor(Math.random() * blocks.length);
+        state.sequence = blocks[randomIndex]; 
+        console.log('📦 產生新區塊:', state.sequence); // 你可以在後端終端機看到這次抽到哪一組
+      }
+
+      // B-3. 從陣列的第一個拿出一個分組，並從陣列中刪除它
+      assignedGroup = state.sequence.shift();
+
+      // B-4. 將剩餘的陣列存回資料庫，等待下一個病患
+      await state.save();
+      
+      // B-5. 將這個病患的分組結果寫入獨立的資料庫，保持雙盲
+      await new RctGroup({ userId, assignedGroup }).save();
+    }
+
+    // 回傳時，把 TTM 分數和 RCT 分組一起丟給前端，但資料庫裡它們是分開的！
     res.json({ 
       success: true, 
       data: {
         scores: savedTtm.scores,
         totalScore: savedTtm.totalScore,
-        stage: savedTtm.stage
+        stage: savedTtm.stage,
+        rctGroup: assignedGroup 
       } 
     });
   } catch (error) {
@@ -254,18 +289,26 @@ app.post('/api/ttm', async (req, res) => {
   }
 });
 
+// 前端重新整理時，需要同時抓取 TTM 和 RCT 資料
 app.get('/api/ttm/:userId', async (req, res) => {
   try {
-    const data = await Ttm.findOne({ userId: req.params.userId });
-    if (!data) return res.json({ success: true, data: null });
+    const { userId } = req.params;
+    
+    // 平行去兩個不同的 Collection 抓資料
+    const [ttmData, rctData] = await Promise.all([
+      Ttm.findOne({ userId }),
+      RctGroup.findOne({ userId })
+    ]);
 
-    // 同樣，讀取時也不要把 group 傳給前端
+    if (!ttmData) return res.json({ success: true, data: null });
+
     res.json({ 
       success: true, 
       data: {
-        scores: data.scores,
-        totalScore: data.totalScore,
-        stage: data.stage
+        scores: ttmData.scores,
+        totalScore: ttmData.totalScore,
+        stage: ttmData.stage,
+        rctGroup: rctData ? rctData.assignedGroup : 'experimental' // 預設防呆
       } 
     });
   } catch (error) {
