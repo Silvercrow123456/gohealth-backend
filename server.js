@@ -14,6 +14,7 @@ const nodemailer = require('nodemailer');
 const Ttm = require('./models/Ttm'); 
 const RctGroup = require('./models/RctGroup');
 const RctState = require('./models/RctState');
+const xlsx = require('xlsx');
 
 const app = express();
 
@@ -341,6 +342,86 @@ app.get('/api/ttm/:userId', async (req, res) => {
     });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
+  }
+});
+/* =======================================================
+   (十) 研究人員專用：匯出全資料庫 Excel API
+   ======================================================= */
+app.get('/api/export-excel', async (req, res) => {
+  try {
+    // 1. 從各個 Collection 抓取所有資料
+    const rctGroups = await RctGroup.find().lean();
+    const ttms = await Ttm.find().lean();
+    const biochems = await Biochem.find().lean();
+    const stats = await Stats.find().lean();
+    const glucoses = await Glucose.find().sort({ measuredAt: 1 }).lean(); // 依時間排序
+
+    // 2. 製作「第一頁：病患總表 (Summary)」
+    const summaryData = rctGroups.map(rct => {
+      const uId = rct.userId;
+      const ttm = ttms.find(t => t.userId === uId) || {};
+      const bio = biochems.find(b => b.userId === uId) || {};
+      const st = stats.find(s => s.userId === uId) || {};
+      
+      // 計算該病患的血糖統計
+      const userGlucoses = glucoses.filter(g => g.userId === uId);
+      const countGlu = userGlucoses.length;
+      let avgGlu = '';
+      if (countGlu > 0) {
+        const sum = userGlucoses.reduce((a, b) => a + b.value, 0);
+        avgGlu = (sum / countGlu).toFixed(1); // 算平均值到小數點第一位
+      }
+
+      return {
+        '病患帳號 (userId)': uId,
+        '實驗分組': rct.assignedGroup === 'experimental' ? '實驗組 (Experimental)' : '控制組 (Control)',
+        'TTM 總分': ttm.totalScore || '',
+        'TTM 階段': ttm.stage || '',
+        'TTM ABC分組': ttm.group || '',
+        '總使用時間(秒)': st.totalUsedSec || 0,
+        '衛教觀看(秒)': st.eduWatchSec || 0,
+        '留言次數': st.countMsg || 0,
+        '血糖測量總次數': countGlu,
+        '平均血糖值': avgGlu,
+        '性別': bio.sex === 'male' ? '男' : (bio.sex === 'female' ? '女' : ''),
+        '身高(cm)': bio.height || '',
+        '體重(kg)': bio.weight || '',
+        'HbA1c(%)': bio.hba1c || '',
+        'Creatinine': bio.creatinine || '',
+        'TC': bio.tc || '',
+        'TG': bio.tg || '',
+        'LDL': bio.ldl || ''
+      };
+    });
+
+    // 3. 製作「第二頁：血糖原始數據 (Raw Glucose)」
+    const glucoseData = glucoses.map(g => ({
+      '病患帳號 (userId)': g.userId,
+      '量測時間': new Date(g.measuredAt).toLocaleString('zh-TW', { timeZone: 'Asia/Taipei' }),
+      '血糖數值 (mg/dL)': g.value
+    }));
+
+    // 4. 產生 Excel 檔案
+    const wb = xlsx.utils.book_new(); // 建立新活頁簿
+    
+    // 把資料轉成 Sheet 並塞進活頁簿
+    const wsSummary = xlsx.utils.json_to_sheet(summaryData);
+    const wsGlucose = xlsx.utils.json_to_sheet(glucoseData);
+    xlsx.utils.book_append_sheet(wb, wsSummary, '病患總表 (Summary)');
+    xlsx.utils.book_append_sheet(wb, wsGlucose, '血糖原始數據 (Glucose)');
+
+    // 5. 轉換成 Buffer 並設定 HTTP Header 讓瀏覽器下載
+    const buffer = xlsx.write(wb, { type: 'buffer', bookType: 'xlsx' });
+    
+    // 設定下載的檔名 (加上今天日期)
+    const today = new Date().toISOString().split('T')[0];
+    res.setHeader('Content-Disposition', `attachment; filename="goHealth_Research_Data_${today}.xlsx"`);
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    
+    res.send(buffer);
+  } catch (error) {
+    console.error('匯出失敗:', error);
+    res.status(500).send('匯出 Excel 時發生錯誤');
   }
 });
 
