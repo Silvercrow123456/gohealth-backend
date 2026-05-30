@@ -84,19 +84,24 @@ app.delete('/api/glucose/:id', async (req, res) => {
 });
 
 /* =======================================================
-   (三) 生理數值 API (Upsert: 更新或新增)
+   (三) 生理數值 API (改為保留歷史紀錄模式)
    ======================================================= */
 app.get('/api/biochem/:userId', async (req, res) => {
-  const data = await Biochem.findOne({ userId: req.params.userId });
-  res.json({ success: true, data: data || {} });
+  // 改為 .find() 抓取全部，並依時間倒序排列 (最新的在最上面)
+  const data = await Biochem.find({ userId: req.params.userId }).sort({ createdAt: -1 });
+  res.json({ success: true, data: data || [] });
 });
+
 app.post('/api/biochem', async (req, res) => {
-  // 使用 findOneAndUpdate，若不存在則新增 (upsert: true)
-  const data = await Biochem.findOneAndUpdate({ userId: req.body.userId }, req.body, { new: true, upsert: true });
+  // 改為每次都 new 一個新紀錄存進去，不覆蓋舊的
+  const newBio = new Biochem(req.body);
+  const data = await newBio.save();
   res.json({ success: true, data });
 });
+
 app.delete('/api/biochem/:userId', async (req, res) => {
-  await Biochem.findOneAndDelete({ userId: req.params.userId });
+  // 清除時，把該病患的所有歷史紀錄都刪掉
+  await Biochem.deleteMany({ userId: req.params.userId });
   res.json({ success: true });
 });
 
@@ -345,14 +350,14 @@ app.get('/api/ttm/:userId', async (req, res) => {
   }
 });
 /* =======================================================
-   (十) 研究人員專用：匯出全資料庫 Excel API (防呆加強版)
+   (十) 研究人員專用：匯出全資料庫 Excel API (防呆加強版 + 全抽血數據)
    ======================================================= */
 app.get('/api/export-excel', async (req, res) => {
   try {
     // 1. 從各個 Collection 抓取所有資料
     const rctGroups = await RctGroup.find().lean();
     
-    // 🟢 防呆：如果資料庫完全沒有受試者，提早擋下來，避免套件當機
+    // 🟢 防呆：如果資料庫完全沒有受試者，提早擋下來
     if (!rctGroups || rctGroups.length === 0) {
       return res.status(400).send(`
         <h2 style="color:#D32F2F;">目前資料庫是空的喔！</h2>
@@ -361,15 +366,15 @@ app.get('/api/export-excel', async (req, res) => {
     }
 
     const ttms = await Ttm.find().lean();
-    const biochems = await Biochem.find().lean();
+    const biochems = await Biochem.find().sort({ createdAt: -1 }).lean(); // 依時間倒序
     const stats = await Stats.find().lean();
-    const glucoses = await Glucose.find().sort({ measuredAt: 1 }).lean(); 
+    const glucoses = await Glucose.find().sort({ measuredAt: 1 }).lean(); // 依時間正序
 
     // 2. 製作「第一頁：病患總表 (Summary)」
     const summaryData = rctGroups.map(rct => {
       const uId = rct.userId;
       const ttm = ttms.find(t => t.userId === uId) || {};
-      const bio = biochems.find(b => b.userId === uId) || {};
+      const bio = biochems.find(b => b.userId === uId) || {}; // 抓取該病患最新的一筆生理資料
       const st = stats.find(s => s.userId === uId) || {};
       
       const userGlucoses = glucoses.filter(g => g.userId === uId);
@@ -391,14 +396,21 @@ app.get('/api/export-excel', async (req, res) => {
         '留言次數': st.countMsg || 0,
         '血糖測量總次數': countGlu,
         '平均血糖值': avgGlu,
-        '性別': bio.sex === 'male' ? '男' : (bio.sex === 'female' ? '女' : ''),
-        '身高(cm)': bio.height || '',
-        '體重(kg)': bio.weight || '',
-        'HbA1c(%)': bio.hba1c || '',
-        'Creatinine': bio.creatinine || '',
-        'TC': bio.tc || '',
-        'TG': bio.tg || '',
-        'LDL': bio.ldl || ''
+        '最新-性別': bio.sex === 'male' ? '男' : (bio.sex === 'female' ? '女' : ''),
+        '最新-身高(cm)': bio.height || '',
+        '最新-體重(kg)': bio.weight || '',
+        '最新-腰圍(cm)': bio.waist || '',
+        '最新-臀圍(cm)': bio.hip || '',
+        '最新-HbA1c(%)': bio.hba1c || '',
+        '最新-Creatinine': bio.creatinine || '',
+        '最新-BUN': bio.BUN || '',
+        '最新-尿蛋白UP': bio.urineProtein || '',
+        '最新-AST': bio.ast || '',
+        '最新-ALT': bio.alt || '',
+        '最新-TC': bio.tc || '',
+        '最新-TG': bio.tg || '',
+        '最新-HDL': bio.hdl || '',
+        '最新-LDL': bio.ldl || ''
       };
     });
 
@@ -409,19 +421,46 @@ app.get('/api/export-excel', async (req, res) => {
       '血糖數值 (mg/dL)': g.value
     }));
 
-    // 🟢 防呆：如果大家完全都沒測過血糖，給一筆假資料避免分頁建立失敗
     if (glucoseData.length === 0) {
       glucoseData = [{ '病患帳號 (userId)': '尚無紀錄', '量測時間': '', '血糖數值 (mg/dL)': '' }];
     }
 
-    // 4. 產生 Excel 檔案
+    // 4. 🟢 製作「第三頁：生理生化與抽血原始數據 (Raw Biochem)」
+    let biochemData = biochems.map(b => ({
+      '病患帳號 (userId)': b.userId,
+      '填寫時間': new Date(b.createdAt).toLocaleString('zh-TW', { timeZone: 'Asia/Taipei' }),
+      '性別': b.sex === 'male' ? '男' : (b.sex === 'female' ? '女' : ''),
+      '身高(cm)': b.height || '',
+      '體重(kg)': b.weight || '',
+      '腰圍(cm)': b.waist || '',
+      '臀圍(cm)': b.hip || '',
+      'HbA1c (%)': b.hba1c || '',
+      'Creatinine (mg/dL)': b.creatinine || '',
+      'BUN (mg/dL)': b.BUN || '',
+      '尿蛋白 (UP)': b.urineProtein || '',
+      'AST (U/L)': b.ast || '',
+      'ALT (U/L)': b.alt || '',
+      'TC (mg/dL)': b.tc || '',
+      'TG (mg/dL)': b.tg || '',
+      'HDL (mg/dL)': b.hdl || '',
+      'LDL (mg/dL)': b.ldl || ''
+    }));
+
+    if (biochemData.length === 0) {
+      biochemData = [{ '病患帳號 (userId)': '尚無紀錄', '填寫時間': '' }];
+    }
+
+    // 5. 產生 Excel 檔案並塞入三個工作表
     const wb = xlsx.utils.book_new(); 
     const wsSummary = xlsx.utils.json_to_sheet(summaryData);
     const wsGlucose = xlsx.utils.json_to_sheet(glucoseData);
+    const wsBiochem = xlsx.utils.json_to_sheet(biochemData);
+
     xlsx.utils.book_append_sheet(wb, wsSummary, '病患總表 (Summary)');
+    xlsx.utils.book_append_sheet(wb, wsBiochem, '生理與抽血數據 (Biochem)'); // 新增這頁
     xlsx.utils.book_append_sheet(wb, wsGlucose, '血糖原始數據 (Glucose)');
 
-    // 5. 轉換成 Buffer 並設定 HTTP Header
+    // 6. 轉換成 Buffer 並設定 HTTP Header
     const buffer = xlsx.write(wb, { type: 'buffer', bookType: 'xlsx' });
     const today = new Date().toISOString().split('T')[0];
     res.setHeader('Content-Disposition', `attachment; filename="goHealth_Research_Data_${today}.xlsx"`);
@@ -429,7 +468,6 @@ app.get('/api/export-excel', async (req, res) => {
     res.send(buffer);
 
   } catch (error) {
-    // 🟢 終極抓蟲：直接把真正的錯誤原因印在畫面上！
     console.error('匯出失敗:', error);
     res.status(500).send(`
       <div style="font-family: Arial; padding: 20px;">
